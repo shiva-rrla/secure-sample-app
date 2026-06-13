@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Gatekeeper Constraint: Require runAsNonRoot on all Containers
+# ---------------------------------------------------------------------------
+# Apply via:
+#   kubectl apply -f gatekeeper-require-non-root.yaml
+# ---------------------------------------------------------------------------
+
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequirenonroot
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireNonRoot
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequirenonroot
+
+        # Deny if any container is missing securityContext.runAsNonRoot = true
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container_security_context_run_as_non_root(container)
+          msg := sprintf("Container %s must set securityContext.runAsNonRoot to true", [container.name])
+        }
+
+        # Also deny initContainers
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          not container_security_context_run_as_non_root(container)
+          msg := sprintf("Init container %s must set securityContext.runAsNonRoot to true", [container.name])
+        }
+
+        container_security_context_run_as_non_root(container) {
+          container.securityContext.runAsNonRoot == true
+        }
+
+        # Also accept if the Pod-level securityContext sets runAsNonRoot
+        container_security_context_run_as_non_root(container) {
+          input.review.object.spec.securityContext.runAsNonRoot == true
+        }
+
+        # Also accept if the Pod-level securityContext sets runAsUser > 0
+        container_security_context_run_as_non_root(container) {
+          input.review.object.spec.securityContext.runAsUser > 0
+        }
+
+        # Also accept if the container-level securityContext sets runAsUser > 0
+        container_security_context_run_as_non_root(container) {
+          container.securityContext.runAsUser > 0
+        }
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireNonRoot
+metadata:
+  name: require-non-root-secure-sample-app
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["secure-sample-app"]

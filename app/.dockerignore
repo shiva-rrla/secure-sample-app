@@ -1,0 +1,17 @@
+# Keep the image minimal and build-cache clean
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.env
+.venv
+env/
+venv/
+tests/
+.pytest_cache/
+*.md
+Dockerfile
+.dockerignore
+.git
+.gitignore

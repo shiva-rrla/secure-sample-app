@@ -1,0 +1,235 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/secure-sample-app
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: Code Quality & Unit Tests
+  # -------------------------------------------------------------------------
+  code-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./app
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: app/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest tests/ -v --cov=. --cov-report=xml
+
+      - name: Lint with Ruff
+        uses: astral-sh/ruff-action@v1
+        with:
+          src: "./app"
+
+  # -------------------------------------------------------------------------
+  # Job 2: Secret Scanning (pre-build)
+  # -------------------------------------------------------------------------
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Secret Detection (TruffleHog)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified --fail
+
+  # -------------------------------------------------------------------------
+  # Job 3: Static Application Security Testing (SAST)
+  # -------------------------------------------------------------------------
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/owasp-top-ten
+            p/ci
+
+  # -------------------------------------------------------------------------
+  # Job 4: Software Composition Analysis (SCA)
+  # -------------------------------------------------------------------------
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Trivy Filesystem Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: './app'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+
+      - name: Upload FS scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+
+  # -------------------------------------------------------------------------
+  # Job 5: Build, Scan & Sign Container Image
+  # -------------------------------------------------------------------------
+  build-and-scan:
+    needs: [code-quality, secret-scan, sast, sca]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # For OIDC / Cosign keyless signing
+    outputs:
+      image_tag: ${{ steps.export.outputs.image_tag }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,suffix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Export image tag
+        id: export
+        run: |
+          # Extract first tag for tools that need a single image reference
+          FIRST_TAG=$(echo '${{ steps.meta.outputs.tags }}' | head -n 1)
+          echo "image_tag=${FIRST_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.export.outputs.image_tag }}
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Upload image scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+
+      - name: Push image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+
+      - name: Sign image with Cosign (keyless)
+        uses: sigstore/cosign-installer@v3
+      - run: cosign sign --yes ${{ steps.export.outputs.image_tag }}@${{ steps.build.outputs.digest }}
+
+  # -------------------------------------------------------------------------
+  # Job 6: Update GitOps Manifests (ArgoCD / Flux style)
+  # -------------------------------------------------------------------------
+  gitops-deploy:
+    needs: build-and-scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Update Kustomize overlay
+        working-directory: ./k8s/overlays/production
+        run: |
+          kustomize edit set image secure-sample-app=${{ needs.build-and-scan.outputs.image_tag }}
+
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "deploy: update production image to ${{ needs.build-and-scan.outputs.image_tag }}"
+          branch: main
+
+  # -------------------------------------------------------------------------
+  # Job 7: Infrastructure as Code (IaC) Security Scan
+  # -------------------------------------------------------------------------
+  iac-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkov Terraform Scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: ./terraform
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+
+      - name: Upload Checkov results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif

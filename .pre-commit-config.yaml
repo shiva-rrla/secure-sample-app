@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Pre-commit hooks – Shift-Left Security
+# Install:  pip install pre-commit && pre-commit install
+# ---------------------------------------------------------------------------
+
+repos:
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: detect-private-key
+
+  # Secret scanning (TruffleHog)
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.79.0
+    hooks:
+      - id: trufflehog
+        name: TruffleHog Secret Scan
+        entry: trufflehog
+        language: system
+        stages: ["pre-commit"]
+        args:
+          - "git"
+          - "file://."
+          - "--only-verified"
+          - "--fail"
+
+  # Python linting & formatting (Ruff)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.8
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+      - id: ruff-format

@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# Network Policies – Zero-Trust L3/L4 Segmentation
+# ---------------------------------------------------------------------------
+
+# 1. Default Deny All Ingress / Egress for application pods
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: secure-sample-app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+# 2. Allow Ingress from the ingress controller namespace ONLY
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-nginx
+  namespace: secure-sample-app
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: secure-sample-app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+        # Alternatively, use podSelector if ingress runs in same ns
+      ports:
+        - protocol: TCP
+          port: 8080
+
+# 3. Allow Egress for DNS resolution and HTTPS external calls
+#    Adjust CIDR blocks to your VPC or corporate proxy ranges.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns-and-https
+  namespace: secure-sample-app
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: secure-sample-app
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # When 'to' is omitted, all destinations are allowed (restricted by port only)
+    - ports:
+        - protocol: TCP
+          port: 443
