@@ -46,7 +46,8 @@ RUN chown -R nonroot:nonroot /home/nonroot/.local ${APP_HOME} && \
     chmod -R 555 ${APP_HOME} && \
     chmod 644 ${APP_HOME}/main.py
 
-ENV PATH=/home/nonroot/.local/bin:${PATH}
+ENV PATH=/home/nonroot/.local/bin:${PATH} \
+    PYTHONPATH=/home/nonroot/.local/lib/python3.12/site-packages:${PYTHONPATH}
 
 # Run as nonroot
 USER nonroot:nonroot
